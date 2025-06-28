@@ -1,0 +1,13 @@
+{
+  "name": "payment-detector",
+  "version": "1.0.0",
+  "dependencies": {
+    "puppeteer": "^23.0.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
+    "ws": "^8.17.0"
+  },
+  "scripts": {
+    "start": "node detector.js"
+  }
+}
