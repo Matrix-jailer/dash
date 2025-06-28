@@ -1,0 +1,12 @@
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier
+from joblib import dump
+
+# Sample training data
+X_train = ["<input name='cardNumber'>", "<script src='js.stripe.com'>", "non-payment content"]
+y_train = [1, 1, 0]  # 1 for payment-related, 0 for non-payment
+vectorizer = TfidfVectorizer()
+X_vec = vectorizer.fit_transform(X_train)
+model = RandomForestClassifier()
+model.fit(X_vec, y_train)
+dump(model, 'payment_classifier.joblib')
