@@ -30,6 +30,7 @@ async function emulateHuman(page) {
 async function detect(url, jobId) {
   const results = { gateways: new Set(), cf: false, captcha: false, three_ds: false, urls: new Set(), error: null };
   let browser;
+
   try {
     browser = await puppeteer.launch({ headless: true, args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'] });
     const page = await browser.newPage();
@@ -47,8 +48,8 @@ async function detect(url, jobId) {
       results.error = `mitmproxy failed: ${e.message}`;
     }
 
-    // DOM and interactions
     await emulateHuman(page);
+
     try {
       await page.goto(url, { timeout: 30000 });
     } catch (e) {
@@ -57,6 +58,7 @@ async function detect(url, jobId) {
       await browser.close();
       return results;
     }
+
     const content = await page.content();
     if (STRIPE_KEYWORDS.some(kw => typeof kw === 'string' ? content.includes(kw) : kw.test(content))) results.gateways.add('Stripe');
     if (PAYPAL_KEYWORDS.some(kw => typeof kw === 'string' ? content.includes(kw) : kw.test(content))) results.gateways.add('PayPal');
@@ -64,7 +66,7 @@ async function detect(url, jobId) {
     if (CAPTCHA_KEYWORDS.some(kw => typeof kw === 'string' ? content.includes(kw) : kw.test(content))) results.captcha = true;
     if (THREE_DS_KEYWORDS.some(kw => typeof kw === 'string' ? content.includes(kw) : kw.test(content))) results.three_ds = true;
 
-    // Buttons and forms
+    // Buttons and links
     const buttons = await page.$$('button, a, input[type="submit"], input[type="button"]');
     for (const button of buttons) {
       try {
@@ -80,11 +82,15 @@ async function detect(url, jobId) {
         console.error(`Error clicking button: ${e}`);
       }
     }
+
+    // ✅ FIXED: Form submission logic
     const forms = await page.$$('form');
     for (const form of forms) {
       try {
-        if (BUTTON_KEYWORDS.some(kw => (await form.evaluate(el => el.innerHTML)).toLowerCase().includes(kw))) {
-          await form.evaluate(el => el.submit()); // Fixed: Changed 'form' to 'el' to avoid shadowing
+        const innerHTML = await form.evaluate(el => el.innerHTML.toLowerCase());
+        const hasKeyword = BUTTON_KEYWORDS.some(kw => innerHTML.includes(kw));
+        if (hasKeyword) {
+          await form.evaluate(el => el.submit());
           console.log('Submitted payment-related form');
           await emulateHuman(page);
         }
@@ -93,12 +99,13 @@ async function detect(url, jobId) {
       }
     }
 
-    // Crawl payment URLs
+    // Crawl payment-related links
     const links = await page.$$('a[href]');
     const urls = (await Promise.all(links.map(link => link.evaluate(el => el.href))))
       .filter(href => !IGNORE_URLS.some(ig => typeof ig === 'string' ? href.includes(ig) : ig.test(href)))
       .filter(href => BUTTON_KEYWORDS.some(kw => href.toLowerCase().includes(kw)))
       .slice(0, 5);
+
     for (const link of urls) {
       try {
         await page.goto(link, { timeout: 15000 });
@@ -129,3 +136,4 @@ if (require.main === module) {
 }
 
 module.exports = { detect };
+                                                   
