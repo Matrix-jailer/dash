@@ -12,99 +12,113 @@ const THREE_DS_KEYWORDS = [/^(3ds|acs_url|verifiedbyvisa|mastercard\.securecode|
 const IGNORE_URLS = [/\.(css|js|png|jpg|jpeg|gif|woff2?|ttf|svg|ico)$/, /usercentrics\.eu/, /onetrust\.com/, /google-analytics\.com/, /facebook\.com/, /adservice\.google\.com/, /about/, /faq/, /login/, /contact/, /blog/];
 
 async function emulateHuman(page) {
-  await page.evaluate(() => {
-    window.scrollBy(0, Math.random() * 100 + 50);
-    document.dispatchEvent(new MouseEvent('mousemove', {
-      bubbles: true,
-      clientX: Math.random() * window.innerWidth,
-      clientY: Math.random() * window.innerHeight
-    }));
-  });
-  await page.waitForTimeout(Math.random() * 2000 + 1000);
+  try {
+    await page.evaluate(() => {
+      window.scrollBy(0, Math.random() * 100 + 50);
+      document.dispatchEvent(new MouseEvent('mousemove', {
+        bubbles: true,
+        clientX: Math.random() * window.innerWidth,
+        clientY: Math.random() * window.innerHeight
+      }));
+    });
+    await page.waitForTimeout(Math.random() * 2000 + 1000);
+  } catch (e) {
+    console.error(`Error in emulateHuman: ${e}`);
+  }
 }
 
 async function detect(url, jobId) {
-  const results = { gateways: new Set(), cf: false, captcha: false, three_ds: false, urls: new Set() };
-  const browser = await puppeteer.launch({ headless: true, args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'] });
-  const page = await browser.newPage();
-  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0');
-  await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-    Object.defineProperty(navigator, 'plugins', { get: () => [{ name: 'Chrome PDF Plugin' }] });
-  });
-
-  // Start mitmproxy
+  const results = { gateways: new Set(), cf: false, captcha: false, three_ds: false, urls: new Set(), error: null };
+  let browser;
   try {
-    execSync(`mitmdump -s mitm_script.py --set url=${url} --set job_id=${jobId} &`, { stdio: 'ignore' });
-  } catch (e) {
-    console.error(`Error starting mitmproxy: ${e}`);
-  }
+    browser = await puppeteer.launch({ headless: true, args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'] });
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0');
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      Object.defineProperty(navigator, 'plugins', { get: () => [{ name: 'Chrome PDF Plugin' }] });
+    });
 
-  // DOM and interactions
-  await emulateHuman(page);
-  try {
-    await page.goto(url, { timeout: 30000 });
-  } catch (e) {
-    console.error(`Navigation error: ${e}`);
+    // Start mitmproxy
+    try {
+      execSync(`mitmdump -s mitm_script.py --set url=${url} --set job_id=${jobId} &`, { stdio: 'ignore' });
+    } catch (e) {
+      console.error(`Error starting mitmproxy: ${e}`);
+      results.error = `mitmproxy failed: ${e.message}`;
+    }
+
+    // DOM and interactions
+    await emulateHuman(page);
+    try {
+      await page.goto(url, { timeout: 30000 });
+    } catch (e) {
+      console.error(`Navigation error: ${e}`);
+      results.error = `Navigation failed: ${e.message}`;
+      await browser.close();
+      return results;
+    }
+    const content = await page.content();
+    if (STRIPE_KEYWORDS.some(kw => typeof kw === 'string' ? content.includes(kw) : kw.test(content))) results.gateways.add('Stripe');
+    if (PAYPAL_KEYWORDS.some(kw => typeof kw === 'string' ? content.includes(kw) : kw.test(content))) results.gateways.add('PayPal');
+    if (CF_KEYWORDS.some(kw => typeof kw === 'string' ? content.includes(kw) : kw.test(content))) results.cf = true;
+    if (CAPTCHA_KEYWORDS.some(kw => typeof kw === 'string' ? content.includes(kw) : kw.test(content))) results.captcha = true;
+    if (THREE_DS_KEYWORDS.some(kw => typeof kw === 'string' ? content.includes(kw) : kw.test(content))) results.three_ds = true;
+
+    // Buttons and forms
+    const buttons = await page.$$('button, a, input[type="submit"], input[type="button"]');
+    for (const button of buttons) {
+      try {
+        const text = (await button.evaluate(el => el.innerText) || '').toLowerCase().trim();
+        const attrs = await button.evaluate(el => Object.fromEntries(Object.entries(el.attributes).map(([k, v]) => [k, v.value])));
+        const attrString = Object.values(attrs).join(' ').toLowerCase();
+        if (BUTTON_KEYWORDS.some(kw => text.includes(kw) || attrString.includes(kw))) {
+          await button.click();
+          console.log(`Clicked button: ${text}`);
+          await emulateHuman(page);
+        }
+      } catch (e) {
+        console.error(`Error clicking button: ${e}`);
+      }
+    }
+    const forms = await page.$$('form');
+    for (const form of forms) {
+      try {
+        if (BUTTON_KEYWORDS.some(kw => (await form.evaluate(el => el.innerHTML)).toLowerCase().includes(kw))) {
+          await form.evaluate(el => el.submit()); // Fixed: Changed 'form' to 'el' to avoid shadowing
+          console.log('Submitted payment-related form');
+          await emulateHuman(page);
+        }
+      } catch (e) {
+        console.error(`Error submitting form: ${e}`);
+      }
+    }
+
+    // Crawl payment URLs
+    const links = await page.$$('a[href]');
+    const urls = (await Promise.all(links.map(link => link.evaluate(el => el.href))))
+      .filter(href => !IGNORE_URLS.some(ig => typeof ig === 'string' ? href.includes(ig) : ig.test(href)))
+      .filter(href => BUTTON_KEYWORDS.some(kw => href.toLowerCase().includes(kw)))
+      .slice(0, 5);
+    for (const link of urls) {
+      try {
+        await page.goto(link, { timeout: 15000 });
+        const linkContent = await page.content();
+        if (STRIPE_KEYWORDS.some(kw => typeof kw === 'string' ? linkContent.includes(kw) : kw.test(linkContent))) results.gateways.add('Stripe');
+        if (PAYPAL_KEYWORDS.some(kw => typeof kw === 'string' ? linkContent.includes(kw) : kw.test(linkContent))) results.gateways.add('PayPal');
+        results.urls.add(link);
+        await emulateHuman(page);
+      } catch (e) {
+        console.error(`Error crawling ${link}: ${e}`);
+      }
+    }
+
     await browser.close();
-    return results;
-  }
-  const content = await page.content();
-  if (STRIPE_KEYWORDS.some(kw => typeof kw === 'string' ? content.includes(kw) : kw.test(content))) results.gateways.add('Stripe');
-  if (PAYPAL_KEYWORDS.some(kw => typeof kw === 'string' ? content.includes(kw) : kw.test(content))) results.gateways.add('PayPal');
-  if (CF_KEYWORDS.some(kw => typeof kw === 'string' ? content.includes(kw) : kw.test(content))) results.cf = true;
-  if (CAPTCHA_KEYWORDS.some(kw => typeof kw === 'string' ? content.includes(kw) : kw.test(content))) results.captcha = true;
-  if (THREE_DS_KEYWORDS.some(kw => typeof kw === 'string' ? content.includes(kw) : kw.test(content))) results.three_ds = true;
-
-  // Buttons and forms
-  const buttons = await page.$$('button, a, input[type="submit"], input[type="button"]');
-  for (const button of buttons) {
-    try {
-      const text = (await button.evaluate(el => el.innerText) || '').toLowerCase().trim();
-      const attrs = await button.evaluate(el => Object.fromEntries(Object.entries(el.attributes).map(([k, v]) => [k, v.value])));
-      const attrString = Object.values(attrs).join(' ').toLowerCase();
-      if (BUTTON_KEYWORDS.some(kw => text.includes(kw) || attrString.includes(kw))) {
-        await button.click();
-        console.log(`Clicked button: ${text}`);
-        await emulateHuman(page);
-      }
-    } catch (e) {
-      console.error(`Error clicking button: ${e}`);
-    }
-  }
-  const forms = await page.$$('form');
-  for (const form of forms) {
-    try {
-      if (BUTTON_KEYWORDS.some(kw => (await form.evaluate(el => el.innerHTML)).toLowerCase().includes(kw))) {
-        await form.evaluate(el => el.submit()); // Fixed: Changed 'form' to 'el' to avoid shadowing
-        console.log('Submitted payment-related form');
-        await emulateHuman(page);
-      }
-    } catch (e) {
-      console.error(`Error submitting form: ${e}`);
-    }
+  } catch (e) {
+    console.error(`Fatal error in detect: ${e}`);
+    results.error = `Detection failed: ${e.message}`;
+    if (browser) await browser.close();
   }
 
-  // Crawl payment URLs
-  const links = await page.$$('a[href]');
-  const urls = (await Promise.all(links.map(link => link.evaluate(el => el.href))))
-    .filter(href => !IGNORE_URLS.some(ig => typeof ig === 'string' ? href.includes(ig) : ig.test(href)))
-    .filter(href => BUTTON_KEYWORDS.some(kw => href.toLowerCase().includes(kw)))
-    .slice(0, 5);
-  for (const link of urls) {
-    try {
-      await page.goto(link, { timeout: 15000 });
-      const linkContent = await page.content();
-      if (STRIPE_KEYWORDS.some(kw => typeof kw === 'string' ? linkContent.includes(kw) : kw.test(linkContent))) results.gateways.add('Stripe');
-      if (PAYPAL_KEYWORDS.some(kw => typeof kw === 'string' ? linkContent.includes(kw) : kw.test(linkContent))) results.gateways.add('PayPal');
-      results.urls.add(link);
-      await emulateHuman(page);
-    } catch (e) {
-      console.error(`Error crawling ${link}: ${e}`);
-    }
-  }
-
-  await browser.close();
   console.log(JSON.stringify({ ...results, gateways: Array.from(results.gateways) }));
   return { ...results, gateways: Array.from(results.gateways) };
 }
