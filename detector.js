@@ -76,7 +76,7 @@ async function detect(url, jobId) {
   for (const form of forms) {
     try {
       if (BUTTON_KEYWORDS.some(kw => (await form.evaluate(el => el.innerHTML)).toLowerCase().includes(kw))) {
-        await form.evaluate(form => form.submit());
+        await form.evaluate(el => el.submit()); // Fixed: Changed 'form' to 'el' to avoid shadowing
         console.log('Submitted payment-related form');
         await emulateHuman(page);
       }
