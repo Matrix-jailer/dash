@@ -1,7 +1,7 @@
 # Base image with Python
 FROM python:3.11-slim
 
-# Install Node.js 20 manually and Chromium dependencies
+# Install Node.js 20 and Chromium dependencies
 RUN apt-get update && \
     apt-get install -y curl gnupg && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
@@ -35,18 +35,15 @@ RUN apt-get update && \
 # Set working directory
 WORKDIR /app
 
-# Copy Node.js files
+# Copy Node.js files and install dependencies (Puppeteer will auto-download Chromium here)
 COPY package.json .
 RUN npm install
 
-# Copy all remaining files
+# Copy all remaining files (Node + Python)
 COPY . .
 
 # Install Python dependencies
 RUN pip install --upgrade pip && pip install -r requirements.txt
-
-# Puppeteer: Pre-install Chromium to avoid redownload in container
-RUN node -e "require('puppeteer').createBrowserFetcher().download('1228205')"
 
 # Expose the port for FastAPI
 EXPOSE 8000
