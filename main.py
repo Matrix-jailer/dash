@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI, BackgroundTasks
 import redis
 import uuid
